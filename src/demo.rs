@@ -1189,6 +1189,62 @@ mod tests {
     }
 
     #[test]
+    fn accessible_tab_reaches_cards_beyond_the_visible_grid() {
+        use crate::ui::widgets::{card, card_row_height, virtual_wrapped_cards};
+        use egui::accesskit::{Action as AccessibleAction, Role};
+        let (ctx, mut app) = accessible_app("card-grid");
+        let mut reached_last = false;
+        let mut render = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 280.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::ScrollArea::vertical().animated(false).show(ui, |ui| {
+                        let height = card_row_height(ui);
+                        virtual_wrapped_cards(ui, 24, height, |ui, index| {
+                            if index == 23 && ui.cursor().top() < ui.clip_rect().bottom() {
+                                reached_last = true;
+                            }
+                            card(
+                                ui,
+                                &mut app,
+                                None,
+                                &format!("Album {index}"),
+                                "Artist",
+                                false,
+                                false,
+                            );
+                        });
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            output.platform_output.accesskit_update.unwrap()
+        };
+        let tree = render(vec![]);
+        let first = accessible_node(&tree, "Album 0, Artist", Role::Button);
+        render(vec![accessible_action(
+            first,
+            AccessibleAction::Focus,
+            None,
+        )]);
+        for _ in 0..80 {
+            render(vec![keyboard(egui::Key::Tab, egui::Modifiers::NONE)]);
+        }
+        assert!(
+            reached_last,
+            "Tab must scroll through the virtual card grid instead of trapping focus in its first visible row"
+        );
+        app.backend.shutdown();
+    }
+
+    #[test]
     fn accessible_playing_and_queued_copies_target_their_own_context() {
         use crate::model::RowContext;
         use crate::ui::widgets::{TrackRow, track_row};

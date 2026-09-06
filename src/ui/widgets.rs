@@ -171,17 +171,24 @@ pub fn virtual_wrapped_cards(
         .floor()
         .max(1.0) as usize;
     let row_count = count.div_ceil(cards_per_row);
+    // CARD_GAP is already in the row height. Do not also inherit item_spacing.y.
+    let previous_spacing = ui.spacing().item_spacing;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let grid_id = ui.unique_id().with("virtual-card");
     virtual_rows(ui, row_count, card_height + CARD_GAP, |ui, row| {
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(spacing, CARD_GAP);
             let start = row * cards_per_row;
             let end = (start + cards_per_row).min(count);
             for index in start..end {
-                card(ui, index);
+                ui.scope_builder(UiBuilder::new().id(grid_id.with(index)), |ui| {
+                    card(ui, index);
+                });
             }
         });
         ui.allocate_space(vec2(row_width, CARD_GAP));
     });
+    ui.spacing_mut().item_spacing = previous_spacing;
 }
 
 /// Asks for the next page when the user scrolls near the end of a list.
@@ -1639,6 +1646,9 @@ pub fn card(
             format!("{title}, {subtitle}"),
         )
     });
+    if response.gained_focus() {
+        response.scroll_to_me(None);
+    }
     let mut play = false;
     if ui.is_rect_visible(rect) {
         let hovered = ui.rect_contains_pointer(rect);
@@ -2316,6 +2326,81 @@ mod tests {
                 .any(|action| matches!(action, Action::LoadMore(Page::Albums))),
             "scrolling near the end must page: {:?}",
             app.actions
+        );
+    }
+
+    #[test]
+    fn virtual_rows_keep_the_gap_a_for_loop_would() {
+        let size = vec2(400.0, 800.0);
+        let clip = Rect::from_min_size(pos2(0.0, 0.0), size);
+        let mut loop_span = 0.0;
+        let mut virt_span = 0.0;
+        run(size, clip, Vec::new(), |ui| {
+            let start = ui.cursor().top();
+            for _ in 0..8 {
+                ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+            }
+            loop_span = ui.cursor().top() - start;
+        });
+        run(size, clip, Vec::new(), |ui| {
+            let start = ui.cursor().top();
+            let gap = ui.spacing().item_spacing.y;
+            virtual_rows(ui, 8, 40.0 + gap, |ui, _| {
+                let width = ui.available_width();
+                ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
+                ui.allocate_space(vec2(width, gap));
+            });
+            virt_span = ui.cursor().top() - start;
+        });
+        assert!(
+            loop_span > 8.0 * 40.0,
+            "a for-loop keeps item spacing: {loop_span}"
+        );
+        assert!(
+            (loop_span - virt_span).abs() < 1.0,
+            "playing-next style virtual rows must keep that spacing: loop={loop_span} virtual={virt_span}"
+        );
+    }
+
+    #[test]
+    fn virtual_wrapped_cards_keep_widget_ids_when_the_first_row_changes() {
+        use std::collections::HashMap;
+        let ctx = egui::Context::default();
+        let size = vec2(400.0, 800.0);
+        let mut top_ids = HashMap::new();
+        run_on(
+            &ctx,
+            size,
+            Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 220.0)),
+            Vec::new(),
+            |ui| {
+                virtual_wrapped_cards(ui, 40, 180.0, |ui, index| {
+                    let response = ui.button(format!("Card {index}"));
+                    top_ids.insert(index, response.id);
+                });
+            },
+        );
+        let mut scrolled_ids = HashMap::new();
+        run_on(
+            &ctx,
+            size,
+            Rect::from_min_max(pos2(0.0, 400.0), pos2(400.0, 620.0)),
+            Vec::new(),
+            |ui| {
+                virtual_wrapped_cards(ui, 40, 180.0, |ui, index| {
+                    let response = ui.button(format!("Card {index}"));
+                    scrolled_ids.insert(index, response.id);
+                });
+            },
+        );
+        let shared = top_ids
+            .keys()
+            .find(|index| scrolled_ids.contains_key(index))
+            .copied()
+            .expect("a card must remain built after the first visible row changes");
+        assert_eq!(
+            top_ids[&shared], scrolled_ids[&shared],
+            "card {shared} must keep its widget id when earlier rows leave the clip"
         );
     }
 

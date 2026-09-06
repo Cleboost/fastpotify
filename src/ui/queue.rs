@@ -226,8 +226,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             });
         });
         ui.add_space(4.0);
-        widgets::virtual_rows(ui, queued_len, row_height, |ui, index| {
+        let gap = ui.spacing().item_spacing.y;
+        widgets::virtual_rows(ui, queued_len, row_height + gap, |ui, index| {
+            let width = ui.available_width();
             queue_row(app, ui, index, compact);
+            ui.allocate_space(egui::vec2(width, gap));
         });
         ui.add_space(14.0);
     }

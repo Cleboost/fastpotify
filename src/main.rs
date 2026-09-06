@@ -615,20 +615,27 @@ fn native_options(
                 None => viewport,
             }
         }
-        None => viewport
-            // macOS: no title bar strip above the app. The content runs to
-            // the top edge and the traffic lights float over it, the way
-            // every other music player on the platform looks; the interface
-            // leaves room for them with `theme::titlebar_inset`.
-            .with_fullsize_content_view(true)
-            .with_titlebar_shown(false)
-            .with_title_shown(false)
-            // Windows has no equivalent to macOS's floating traffic lights.
-            // Removing its decorations lets the app surface fill the window.
-            .with_decorations(main_window_decorated(cfg!(windows)))
-            .with_inner_size(inner_size.unwrap_or([1240.0, 800.0]))
-            .with_min_inner_size(inner_size.unwrap_or([760.0, 520.0]))
-            .with_fullscreen(fullscreen),
+        None => {
+            let size = inner_size.unwrap_or([1240.0, 800.0]);
+            let mut viewport = viewport
+                // macOS: no title bar strip above the app. The content runs to
+                // the top edge and the traffic lights float over it, the way
+                // every other music player on the platform looks; the interface
+                // leaves room for them with `theme::titlebar_inset`.
+                .with_fullsize_content_view(true)
+                .with_titlebar_shown(false)
+                .with_title_shown(false)
+                // Windows has no equivalent to macOS's floating traffic lights.
+                // Removing its decorations lets the app surface fill the window.
+                .with_decorations(main_window_decorated(cfg!(windows)))
+                .with_inner_size(size)
+                .with_min_inner_size(inner_size.unwrap_or([760.0, 520.0]))
+                .with_fullscreen(fullscreen);
+            if inner_size.is_some() {
+                viewport = viewport.with_max_inner_size(size);
+            }
+            viewport
+        }
     };
     eframe::NativeOptions {
         viewport,
@@ -664,6 +671,10 @@ mod native_window_tests {
         assert_eq!(options.viewport.inner_size, Some(egui::vec2(760.0, 800.0)));
         assert_eq!(
             options.viewport.min_inner_size,
+            Some(egui::vec2(760.0, 800.0))
+        );
+        assert_eq!(
+            options.viewport.max_inner_size,
             Some(egui::vec2(760.0, 800.0))
         );
     }
