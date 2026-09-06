@@ -5206,6 +5206,7 @@ impl App {
     // ---- actions -----------------------------------------------------------------
 
     fn apply_actions(&mut self, ctx: &egui::Context) {
+        self.frame_now = None;
         let mut actions = std::mem::take(&mut self.actions);
         while !actions.is_empty() {
             for action in actions.drain(..) {
@@ -8072,8 +8073,9 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_snapshot_sees_optimistic_pause_in_the_same_batch() {
+    fn two_toggle_play_actions_in_one_batch_return_to_playing() {
         let mut app = headless_app();
+        let ctx = egui::Context::default();
         app.local.track = Some(crate::player::LocalTrack {
             uri: "spotify:track:a".into(),
             title: "A".into(),
@@ -8082,15 +8084,12 @@ mod tests {
         app.local.playback = Playback::Playing;
         app.refresh_frame_now();
         assert!(app.now_playing().expect("playing").playing);
-        app.optimistic_playing = Some((false, Instant::now()));
+        app.actions.push(Action::TogglePlay);
+        app.actions.push(Action::TogglePlay);
+        app.apply_actions(&ctx);
         assert!(
-            app.now_playing().expect("snapshot").playing,
-            "the pre-action snapshot must not flip until the frame refreshes"
-        );
-        app.refresh_frame_now();
-        assert!(
-            !app.now_playing().expect("paused").playing,
-            "after apply_actions the snapshot must match the optimistic pause"
+            app.now_playing().expect("playing").playing,
+            "the second toggle must see the first pause, not the drawing snapshot"
         );
     }
 
