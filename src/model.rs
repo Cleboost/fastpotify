@@ -22,19 +22,73 @@ pub struct TableRowsCache {
 }
 
 impl TableRowsCache {
-    /// Heap-ish retained size: struct slots plus the URI/name strings we own.
+    /// Retained heap for this cache: nested track/episode metadata, not just
+    /// the top-level URI and title.
     pub fn retained_bytes(&self) -> usize {
-        self.items
-            .iter()
-            .map(|(item, added, by)| {
-                std::mem::size_of_val(item)
-                    + item.uri().len()
-                    + item.name().len()
-                    + added.as_ref().map(String::len).unwrap_or(0)
-                    + by.as_ref().map(String::len).unwrap_or(0)
-            })
-            .sum()
+        std::mem::size_of::<Self>()
+            + self
+                .items
+                .iter()
+                .map(|(item, added, by)| {
+                    playable_retained_bytes(item)
+                        + added.as_ref().map(String::len).unwrap_or(0)
+                        + by.as_ref().map(String::len).unwrap_or(0)
+                })
+                .sum::<usize>()
     }
+}
+
+fn playable_retained_bytes(item: &PlayableItem) -> usize {
+    match item {
+        PlayableItem::Track(track) => track_retained_bytes(track),
+        PlayableItem::Episode(episode) => episode_retained_bytes(episode),
+    }
+}
+
+fn artist_ref_retained_bytes(artist: &ArtistRef) -> usize {
+    artist.name.len()
+        + artist.id.as_ref().map(String::len).unwrap_or(0)
+        + artist.uri.as_ref().map(String::len).unwrap_or(0)
+}
+
+fn image_retained_bytes(images: &[Image]) -> usize {
+    images.iter().map(|image| image.url.len()).sum()
+}
+
+fn album_retained_bytes(album: &Album) -> usize {
+    album.id.len()
+        + album.name.len()
+        + album.uri.len()
+        + album.album_type.as_ref().map(String::len).unwrap_or(0)
+        + album.release_date.as_ref().map(String::len).unwrap_or(0)
+        + image_retained_bytes(&album.images)
+        + album
+            .artists
+            .iter()
+            .map(artist_ref_retained_bytes)
+            .sum::<usize>()
+}
+
+fn track_retained_bytes(track: &Track) -> usize {
+    std::mem::size_of::<Track>()
+        + track.name.len()
+        + track.uri.len()
+        + track.id.as_ref().map(String::len).unwrap_or(0)
+        + track
+            .artists
+            .iter()
+            .map(artist_ref_retained_bytes)
+            .sum::<usize>()
+        + track.album.as_ref().map(album_retained_bytes).unwrap_or(0)
+}
+
+fn episode_retained_bytes(episode: &Episode) -> usize {
+    std::mem::size_of::<Episode>()
+        + episode.id.len()
+        + episode.name.len()
+        + episode.uri.len()
+        + episode.description.len()
+        + image_retained_bytes(&episode.images)
 }
 
 /// Every screen the central panel can show.

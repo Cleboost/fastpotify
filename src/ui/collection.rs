@@ -366,6 +366,7 @@ pub fn cached_table_items(
     if let Some(items) =
         table_items_hit(app, &page, generation, items_revision, user_names_revision)
     {
+        app.retain_table_rows(&page);
         return items;
     }
     remember_table_items(
@@ -1317,8 +1318,53 @@ fn palette_of(app: &App) -> Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::models::{Album, ArtistRef, Track};
+    use crate::api::models::{Album, ArtistRef, Image, Track};
     use crate::model::PlaylistPage;
+
+    fn make_large_tracks(count: usize) -> Vec<TableItem> {
+        (0..count)
+            .map(|i| {
+                let track = Track {
+                    id: Some(format!("t_{i}")),
+                    name: format!("Nested metadata song {i} with a longer title"),
+                    uri: format!("spotify:track:large-{i}"),
+                    duration_ms: 180_000,
+                    artists: vec![ArtistRef {
+                        id: Some(format!("artist-{i}")),
+                        name: format!("Nested Artist Name {i}"),
+                        uri: Some(format!("spotify:artist:artist-{i}")),
+                    }],
+                    album: Some(Album {
+                        id: format!("alb-{i}"),
+                        name: format!("Nested Album Title {i}"),
+                        uri: format!("spotify:album:alb-{i}"),
+                        images: vec![
+                            Image {
+                                url: format!("https://i.scdn.co/image/large-{i}-640"),
+                                width: Some(640),
+                                height: Some(640),
+                            },
+                            Image {
+                                url: format!("https://i.scdn.co/image/large-{i}-300"),
+                                width: Some(300),
+                                height: Some(300),
+                            },
+                        ],
+                        ..Album::default()
+                    }),
+                    ..Track::default()
+                };
+                (PlayableItem::Track(track), None, None)
+            })
+            .collect()
+    }
+
+    fn names_only_bytes(items: &[TableItem]) -> usize {
+        items
+            .iter()
+            .map(|(item, ..)| item.uri().len() + item.name().len())
+            .sum()
+    }
 
     fn make_test_tracks() -> Vec<TableItem> {
         let titles = [
@@ -1516,14 +1562,37 @@ mod tests {
     }
 
     #[test]
-    fn table_row_cache_dies_when_account_data_resets() {
+    fn table_row_cache_memory_counts_nested_metadata_on_a_large_collection() {
         let mut app = test_app();
-        cached_table_items(&mut app, Page::LikedSongs, 0, 0, 0, make_test_tracks);
-        assert!(!app.table_rows.is_empty());
-        let before = app.table_rows_retained_bytes();
-        assert!(before > 0, "cached rows should retain heap");
-        app.table_rows.clear();
+        let items = make_large_tracks(500);
+        let names_only = names_only_bytes(&items);
         assert_eq!(app.table_rows_retained_bytes(), 0);
+        cached_table_items(&mut app, Page::LikedSongs, 0, 0, 0, || items);
+        let after = app.table_rows_retained_bytes();
+        assert!(
+            after > names_only,
+            "retained bytes must include nested album, artist, and image strings, not just titles: names_only={names_only} after={after}"
+        );
+        assert!(
+            after > 80_000,
+            "500 tracks with nested metadata should retain a substantial copy: {after}"
+        );
+    }
+
+    #[test]
+    fn table_row_cache_drops_when_the_backing_page_is_evicted() {
+        let mut app = test_app();
+        let page = Page::Playlist("pl-gone".into());
+        app.playlist_pages
+            .insert("pl-gone".into(), PlaylistPage::default());
+        cached_table_items(&mut app, page.clone(), 1, 0, 0, make_test_tracks);
+        assert!(app.table_rows.contains_key(&page));
+        app.playlist_pages.remove("pl-gone");
+        app.open(Page::LikedSongs);
+        assert!(
+            !app.table_rows.contains_key(&page),
+            "evicting the page map must drop the table-row copy"
+        );
     }
 
     #[test]

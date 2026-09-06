@@ -4236,7 +4236,8 @@ impl App {
 
     pub fn open(&mut self, page: Page) {
         if *self.page() == page {
-            self.ensure_loaded(page);
+            self.ensure_loaded(page.clone());
+            self.retain_table_rows(&page);
             return;
         }
         self.history.truncate(self.history_index + 1);
@@ -4246,7 +4247,8 @@ impl App {
         }
         self.history_index = self.history.len() - 1;
         self.show_devices = false;
-        self.ensure_loaded(page);
+        self.ensure_loaded(page.clone());
+        self.retain_table_rows(&page);
     }
 
     /// Hands the app a Spotify link from outside, a canonical URI as
@@ -5285,14 +5287,16 @@ impl App {
                 if self.can_go_back() {
                     self.history_index -= 1;
                     let page = self.page().clone();
-                    self.ensure_loaded(page);
+                    self.ensure_loaded(page.clone());
+                    self.retain_table_rows(&page);
                 }
             }
             Action::Forward => {
                 if self.can_go_forward() {
                     self.history_index += 1;
                     let page = self.page().clone();
-                    self.ensure_loaded(page);
+                    self.ensure_loaded(page.clone());
+                    self.retain_table_rows(&page);
                 }
             }
             Action::PlayContext {
