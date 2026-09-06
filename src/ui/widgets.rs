@@ -54,6 +54,11 @@ pub fn paint_cover(
         };
         if let Some(art) = art {
             art.release_bytes(url);
+            art.note_decoded(
+                url,
+                texture.size.x.round() as usize,
+                texture.size.y.round() as usize,
+            );
         }
 
         let image_aspect = texture.size.x / texture.size.y;

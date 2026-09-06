@@ -16,17 +16,20 @@ use sha1::{Digest, Sha1};
 ///
 /// Size-based eviction keeps visible images stable.
 const HELD_BYTES: usize = 64 * 1024 * 1024;
-/// After JPEG bytes are dropped, eviction still needs a size. Spotify list
-/// covers are typically 300×300; a GPU texture is RGBA, so 256×256×4 = 256 KiB
-/// is a lower-bound stand-in. Counting them as 0 would stop eviction.
-const TEXTURE_BYTES: usize = 256 * 256 * 4;
 const MAX_ART_BYTES: usize = 8 * 1024 * 1024;
+
+/// Decoded ColorImage plus the GPU texture, both RGBA.
+fn decoded_and_texture_bytes(width: usize, height: usize) -> usize {
+    2 * width.saturating_mul(height).saturating_mul(4)
+}
 
 enum Entry {
     Pending,
     Ready {
         bytes: Option<Arc<[u8]>>,
         last_used: Instant,
+        /// JPEG bytes still held, plus decoded image and texture once painted.
+        retained: usize,
     },
     Failed(String),
 }
@@ -84,9 +87,12 @@ impl ArtLoader {
                 match entry {
                     // Forget failures so a later request can retry.
                     Entry::Failed(_) => failed.push(url.clone()),
-                    Entry::Ready { bytes, last_used } => {
-                        let size = bytes.as_ref().map_or(TEXTURE_BYTES, |bytes| bytes.len());
-                        held.push((url.clone(), *last_used, size));
+                    Entry::Ready {
+                        last_used,
+                        retained,
+                        ..
+                    } => {
+                        held.push((url.clone(), *last_used, *retained));
                     }
                     Entry::Pending => {}
                 }
@@ -96,7 +102,7 @@ impl ArtLoader {
         };
         for url in letting_go {
             ctx.forget_image(&url);
-            self.inner.drop_bytes(&url);
+            self.forget(&url);
         }
     }
 
@@ -118,6 +124,22 @@ impl ArtLoader {
     /// remains for later reloads.
     pub fn release_bytes(&self, url: &str) {
         self.inner.drop_bytes(url);
+    }
+
+    /// Record decoded image + texture size after egui has uploaded the cover.
+    pub fn note_decoded(&self, url: &str, width: usize, height: usize) {
+        if let Some(Entry::Ready {
+            bytes, retained, ..
+        }) = self
+            .inner
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(url)
+        {
+            let jpeg = bytes.as_ref().map(|bytes| bytes.len()).unwrap_or(0);
+            *retained = jpeg + decoded_and_texture_bytes(width, height);
+        }
     }
 
     pub fn clear_disk_cache(&self) -> std::io::Result<u64> {
@@ -227,6 +249,7 @@ impl Inner {
             let result = loader.fetch(&url).await;
             let entry = match result {
                 Ok(bytes) => Entry::Ready {
+                    retained: bytes.len(),
                     bytes: Some(bytes),
                     last_used: Instant::now(),
                 },
@@ -242,14 +265,16 @@ impl Inner {
     }
 
     fn drop_bytes(&self, url: &str) {
-        if let Some(entry) = self
+        if let Some(Entry::Ready {
+            bytes, retained, ..
+        }) = self
             .entries
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(url)
-            && let Entry::Ready { bytes, .. } = entry
+            && let Some(held) = bytes.take()
         {
-            *bytes = None;
+            *retained = retained.saturating_sub(held.len());
         }
     }
 }
@@ -268,6 +293,7 @@ impl BytesLoader for ArtLoader {
             Some(Entry::Ready {
                 bytes: Some(bytes),
                 last_used,
+                ..
             }) => {
                 *last_used = Instant::now();
                 Ok(BytesPoll::Ready {
@@ -279,6 +305,7 @@ impl BytesLoader for ArtLoader {
             Some(Entry::Ready {
                 bytes: None,
                 last_used,
+                ..
             }) => {
                 *last_used = Instant::now();
                 entries.insert(uri.to_string(), Entry::Pending);
@@ -474,23 +501,92 @@ mod tests {
         assert!(over_budget(Vec::new(), 0).is_empty());
     }
 
-    #[test]
-    fn texture_only_entries_still_count_toward_the_budget() {
-        assert_eq!(TEXTURE_BYTES, 256 * 256 * 4);
-        let many = (0..300)
-            .map(|i| {
-                (
-                    format!("https://i.scdn.co/image/{i}"),
-                    Instant::now() - Duration::from_secs(i),
-                    TEXTURE_BYTES,
-                )
+    fn retained_total(loader: &ArtLoader) -> usize {
+        loader
+            .inner
+            .entries
+            .lock()
+            .expect("lock")
+            .values()
+            .map(|entry| match entry {
+                Entry::Ready { retained, .. } => *retained,
+                _ => 0,
             })
-            .collect();
-        let dropped = over_budget(many, HELD_BYTES);
-        assert!(
-            !dropped.is_empty(),
-            "256 KiB stand-in must still evict once the 64 MiB budget is full"
+            .sum()
+    }
+
+    #[test]
+    fn large_covers_evict_using_decoded_and_texture_sizes() {
+        let one = decoded_and_texture_bytes(640, 640);
+        assert_eq!(one, 2 * 640 * 640 * 4);
+        let jpeg = 50_000usize;
+        let dir = std::env::temp_dir().join(format!(
+            "fastpotify-art-budget-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime for eviction");
+        let loader = ArtLoader::new(
+            reqwest::Client::new(),
+            runtime.handle().clone(),
+            dir.clone(),
         );
+        let now = Instant::now();
+        for i in 0..40 {
+            let url = format!("https://i.scdn.co/image/{i}");
+            loader.inner.entries.lock().expect("lock").insert(
+                url,
+                Entry::Ready {
+                    bytes: Some(Arc::from(vec![0u8; jpeg])),
+                    last_used: now - Duration::from_secs(40 - i),
+                    retained: jpeg,
+                },
+            );
+        }
+        let jpeg_total = retained_total(&loader);
+        assert!(
+            jpeg_total < HELD_BYTES,
+            "JPEG-only covers must still fit the budget: {jpeg_total}"
+        );
+        for i in 0..40 {
+            let url = format!("https://i.scdn.co/image/{i}");
+            loader.release_bytes(&url);
+            loader.note_decoded(&url, 640, 640);
+        }
+        let before = retained_total(&loader);
+        assert_eq!(before, 40 * one);
+        assert!(
+            before > HELD_BYTES,
+            "decoded 640×640 covers plus textures must exceed 64 MiB: {before}"
+        );
+        let ctx = egui::Context::default();
+        loader.evict(&ctx);
+        let after = retained_total(&loader);
+        assert!(
+            after <= HELD_BYTES,
+            "eviction must bring retained decoded+texture bytes under budget: after={after}"
+        );
+        assert!(
+            after < before,
+            "a long scroll of large covers must free memory: before={before} after={after}"
+        );
+        let entries = loader.inner.entries.lock().expect("lock");
+        assert!(
+            !entries.contains_key("https://i.scdn.co/image/0"),
+            "the oldest scrolled-away cover must go first"
+        );
+        assert!(
+            entries.contains_key("https://i.scdn.co/image/39"),
+            "the cover just scrolled into view must stay"
+        );
+        drop(entries);
+        loader.forget_all();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -523,6 +619,7 @@ mod tests {
             Entry::Ready {
                 bytes: None,
                 last_used: Instant::now(),
+                retained: 0,
             },
         );
         let ctx = egui::Context::default();
